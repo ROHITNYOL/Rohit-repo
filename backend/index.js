@@ -1,132 +1,168 @@
-const express = require('express');
-const { google } = require('googleapis');
-const dotenv = require('dotenv');
+const express = require("express");
 const cors = require("cors");
+const session = require("express-session");
+const { google } = require("googleapis");
+const dotenv = require("dotenv");
+const { auth } = require("googleapis/build/src/apis/abusiveexperiencereport");
 dotenv.config();
-
+const calendar = google.calendar("v3");//defininng the version of the google calendar
 const app = express();
+app.use(express.json());//need this to work with the json data btw frontend and backend
 const PORT = process.env.PORT || 5000;
 
+// Initialize OAuth2 client
 const oauth2Client = new google.auth.OAuth2(
   process.env.CLIENT_ID,
   process.env.CLIENT_SECRET,
-  process.env.REDIRECT_URI
+  process.env.REDIRECT_URL
+);
+//initialising a session basically to store some data in session
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET,//random secret anything for our session
+    resave: false,//to not save previous data which is unneccessary for us
+    saveUninitialized: false,//not saving that prev data
+    cookie: { secure: true }, // Ensure secure cookie setting for production
+  })
 );
 
+// Enable CORS
+app.use(cors());
 
-app.use(
-    cors({
-      origin: ["http://localhost:5173"],
-      methods: ["GET", "POST"],
-      credentials: true,
-    })
-  );
+// Middleware to check OAuth2 tokens
+const maintainsession = async (req, res, next) => {//eventhough this middle ware is not used in any function whenever these sessions work they automatically initialise this middleware
+  const tokens = req.session.tokens;
+  if (!tokens || !tokens.access_token || !tokens.refresh_token) {
+    return res.status(401).json({ error: "OAuth2 tokens not set" });
+  }
 
-app.get('/auth', (req, res) => {
-  const url = oauth2Client.generateAuthUrl({
-    access_type: 'offline',
-    scope: ['https://www.googleapis.com/auth/calendar']
+  if (tokens.expiry_date <= Date.now()) {//we send the refresh token whenever the session is expired
+    try {
+      const newAccessToken = await refreshTokens(tokens);
+      tokens.access_token = newAccessToken;//replacing the access token with the new one
+      req.session.tokens = tokens;//updating the new tokens
+      oauth2Client.setCredentials(tokens);//reinitialising so session continues being logged in
+      next();//continues the next function
+    } catch (error) {
+      console.error("Error refreshing tokens:", error);
+      res.status(401).json({ error: "Failed to refresh OAuth2 tokens" });
+    }
+  } else {
+    oauth2Client.setCredentials(tokens);//or else continue with the old tokens only
+    next();
+  }
+};
+
+// Function to refresh OAuth2 tokens
+async function refreshTokens(tokens) {
+  const refreshToken = tokens.refresh_token;
+  const { credentials } = await oauth2Client.refreshToken(refreshToken);
+  const newAccessToken = credentials.access_token;
+  const newExpiryDate = credentials.expiry_date;
+  tokens.access_token = newAccessToken;
+  tokens.expiry_date = newExpiryDate;
+  return newAccessToken;
+}
+
+
+// Routes
+app.get("/auth", (req, res) => {
+  const authUrl = oauth2Client.generateAuthUrl({
+    access_type: "offline",
+    scope: ["https://www.googleapis.com/auth/calendar"],
   });
-  res.redirect(url);
+  res.redirect(authUrl);
 });
 
-app.get('/auth/callback', async (req, res) => {
-  const { code } = req.query;
-  const { tokens } = await oauth2Client.getToken(code);
-  oauth2Client.setCredentials(tokens);
-  res.send('Authentication successful! Please return to the console.');
+app.get("/auth/callback", async (req, res) => {
+  const code = req.query.code;//this code basically serves like a password to get the specific tokens
+  try {
+    const { tokens } = await oauth2Client.getToken(code);
+    oauth2Client.setCredentials(tokens);
+    req.session.tokens = tokens;
+    res.redirect(process.env.Front_endURL); // Replace with your frontend URL
+  } catch (error) {
+    console.error("Error handling OAuth2 redirect:", error);
+    res.status(500).send("Error handling OAuth2 redirect");
+  }
 });
-app.post('/events', async (req, res) => {
-    const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+app.post("/createEvent", async (req, res) => {
+  try {
+    const { summary, description, start, end } = req.body;
+    console.log(req.body)
+    if (!summary || !description || !start || !end) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
     const event = {
-      summary: 'Google I/O 2021',
-      description: 'A chance to hear more about Google\'s developer products.',
+      summary: summary,
+      description: description,
       start: {
-        dateTime: '2021-05-28T09:00:00-07:00',
-        timeZone: 'America/Los_Angeles',
+        dateTime: start,//ensure these datetime is in isoString format
+        timeZone: "Asia/Kolkata",
       },
       end: {
-        dateTime: '2021-05-28T17:00:00-07:00',
-        timeZone: 'America/Los_Angeles',
+        dateTime: end,
+        timeZone: "Asia/Kolkata",
       },
     };
-  
-    try {
-      const response = await calendar.events.insert({
-        auth:oauth2Client,
-        calendarId: 'primary',
-        requestBody: event,
-      });
-      res.status(200).json(response.data);
-    } catch (error) {
-      res.status(400).json({ error: error.message });
-    }
-  });
 
-  app.get('/events', async (req, res) => {
-    const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
-  
-    try {
-      const response = await calendar.events.list({
-        calendarId: 'primary',
-        timeMin: new Date().toISOString(),
-        maxResults: 10,
-        singleEvents: true,
-        orderBy: 'startTime',
-      });
-      res.status(200).json(response.data.items);
-    } catch (error) {
-      res.status(400).json({ error: error.message });
-    }
-  });
+    console.log("Creating event with body:", event);
 
-  app.put('/events/:eventId', async (req, res) => {
-    const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
-    const eventId = req.params.eventId;
-  
-    const event = {
-      summary: 'Updated Event Title',
-      location: 'Updated Event Location',
-      description: 'Updated Event Description',
-      start: {
-        dateTime: '2021-05-29T09:00:00-07:00',
-        timeZone: 'America/Los_Angeles',
-      },
-      end: {
-        dateTime: '2021-05-29T17:00:00-07:00',
-        timeZone: 'America/Los_Angeles',
-      },
-    };
-  
-    try {
-      const response = await calendar.events.update({
-        calendarId: 'primary',
-        eventId: eventId,
-        resource: event,
-      });
-      res.status(200).json(response.data);
-    } catch (error) {
-      res.status(400).json({ error: error.message });
-    }
-  });
+    const response = await calendar.events.insert({
+      auth: oauth2Client,//as the insertion or deletion needs authorisation
+      calendarId: "primary",
+      requestBody: event,
+    });
 
-  app.delete('/events/:eventId', async (req, res) => {
-    const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
-    const eventId = req.params.eventId;
-  
-    try {
-      await calendar.events.delete({
-        calendarId: 'primary',
-        eventId: eventId,
-      });
-      res.status(204).send();
-    } catch (error) {
-      res.status(400).json({ error: error.message });
-    }
-  });
+    const createdEvent = response.data;
+    console.log("Event created:", createdEvent);
 
-  
+    res.status(200).json({ message: "Event added successfully", event: createdEvent });
+  } catch (error) {
+    console.error("Error creating event:", error);
+    res.status(500).json({ error: "Failed to create event" });
+  }
+});
+//to fetch the events
+app.get("/events", async (req, res) => {
+  try {
+    const { timeMin, timeMax } = req.query;//the encoded url that we sent from the frontend is basically the req now by using the express we get those data
+    const response = await calendar.events.list({
+      auth: oauth2Client,
+      calendarId: "primary",
+      timeMin: timeMin || new Date().toISOString(),
+      timeMax: timeMax || undefined,
+      maxResults: 10,//can show as many as required here set to max 10
+      singleEvents: true,
+      orderBy: "startTime",
+    });
 
+    const events = response.data.items;
+    res.status(200).json(events);
+  } catch (error) {
+    console.error("Error fetching events:", error);
+    res.status(500).json({ error: "Failed to fetch events" });
+  }
+});
+
+app.delete("/events/:eventId", async (req, res) => {
+  const eventId = req.params.eventId;
+
+  try {
+    await calendar.events.delete({
+      auth:oauth2Client,
+      calendarId: "primary",
+      eventId: eventId,
+    });
+    res.status(204).send();
+  } catch (error) {
+    console.error("Error deleting event:", error);
+    res.status(500).json({ error: "Failed to delete event" });
+  }
+});
+
+// Start the server
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });

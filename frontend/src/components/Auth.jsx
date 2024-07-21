@@ -4,7 +4,7 @@ import axios from 'axios';
 
 const Auth = () => {
   const handleAuth = () => {
-    window.location.href = 'http://localhost:5000/auth';
+    window.location.href = `${import.meta.env.VITE_Backend_URL}/auth`;
   };
 
   return (
